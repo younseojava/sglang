@@ -117,6 +117,8 @@ def eval_mmmu(args):
     save_json(args.output_path, out_samples)
     eval_result(output_path=args.output_path, answer_dict=answer_dict)
 
+    return backend
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -124,4 +126,6 @@ if __name__ == "__main__":
     EvalArgs.add_cli_args(parser)
     args = parser.parse_args()
 
-    eval_mmmu(args)
+    vlm = eval_mmmu(args)
+
+    vlm.shutdown()
