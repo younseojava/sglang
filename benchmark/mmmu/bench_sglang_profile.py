@@ -10,7 +10,9 @@
 import argparse
 import base64
 import dataclasses
+import os
 import random
+import torch
 from io import BytesIO
 
 from data_utils import save_json
@@ -29,22 +31,13 @@ from sglang.srt.openai_api.protocol import ChatCompletionRequest
 from sglang.srt.server_args import ServerArgs
 
 
-def eval_mmmu(args):
-    server_args = ServerArgs.from_cli_args(args)
-    eval_args = EvalArgs.from_cli_args(args)
+def run_generation(server_args, eval_args, samples):
 
-    if server_args.chat_template is None:
-        raise ValueError("Chat template must be provided for this benchmark")
-
-    samples = prepare_samples(eval_args)
+    out_samples, answer_dict = dict(), dict()
 
     backend = Engine(**dataclasses.asdict(server_args))
-
-    out_samples = dict()
-
     sampling_params = get_sampling_params(eval_args)
 
-    answer_dict = {}
     for sample in tqdm(samples):
         prompt = sample["final_input_prompt"]
         image = sample["image"]
@@ -113,17 +106,69 @@ def eval_mmmu(args):
             "ground_truth": sample["answer"],
         }
 
-    args.output_path = f"{args.model_path}_val_sglang.json"
-    save_json(args.output_path, out_samples)
-    eval_result(output_path=args.output_path, answer_dict=answer_dict)
-
     backend.shutdown()
 
+    return out_samples, answer_dict
 
+
+def eval_mmmu(args):
+    server_args = ServerArgs.from_cli_args(args)
+    eval_args = EvalArgs.from_cli_args(args)
+
+    if server_args.chat_template is None:
+        raise ValueError("Chat template must be provided for this benchmark")
+
+    samples = prepare_samples(eval_args)
+    # use 2.5% of original samples
+    n_samples = len(samples) // 40
+    # samples = samples[:n_samples]
+    samples = samples[0:2]
+
+
+    profile_memory = False
+    activities = [
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ]
+    profiler = torch.profiler.profile(activities=activities, with_stack=False)
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    # with torch.profiler.profile(activities=activities, record_shapes=True, profile_memory=profile_memory) as prof:
+    #     with torch.profiler.record_function("generation"):
+    #         out_samples, answer_dict = run_generation(server_args, eval_args, samples)
+    # 
+    # if profile_memory == False:
+    #     print(prof.key_averages().table(sort_by="self_cuda_time_total", row_limit=-1))
+    # else:
+    #     print(prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=10))
+
+    # measurement block
+    start_event.record()
+    profiler.start()
+
+    out_samples, answer_dict = run_generation(server_args, eval_args, samples)
+
+    profiler.stop()
+    end_event.record()
+    torch.cuda.synchronize()
+
+    prof_file = 'mmmu_profile.trace.json'
+    parent_dir = os.path.dirname(os.path.abspath(prof_file))
+    os.makedirs(parent_dir, exist_ok=True)
+    profiler.export_chrome_trace(prof_file)
+    etime = start_event.elapsed_time(end_event) / 1000.
+    # args.output_path = f"{args.model_path}_val_sglang.json"
+    # save_json(args.output_path, out_samples)
+    # eval_result(output_path=args.output_path, answer_dict=answer_dict)
+
+    print(f'Mmmu evaluation elapsed time = {etime:.4f} sec')
+
+    
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     ServerArgs.add_cli_args(parser)
     EvalArgs.add_cli_args(parser)
-    args = parser.parse_args()
+    args = parser.parse_args
 
     eval_mmmu(args)
